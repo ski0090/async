@@ -728,33 +728,6 @@ impl Async {
     ) -> AsyncBuilder<D> {
         AsyncBuilder::new(drain)
     }
-
-    fn push_dropped(&self, logger_values: &OwnedKVList) -> AsyncResult<()> {
-        let dropped = self.dropped.swap(0, Ordering::Relaxed);
-        if dropped > 0 {
-            match self.core.log(
-                &record!(
-                    slog::Level::Error,
-                    "slog-async",
-                    &format_args!(
-                        "slog-async: logger dropped messages \
-                         due to channel \
-                         overflow"
-                    ),
-                    b!("count" => dropped)
-                ),
-                logger_values,
-            ) {
-                Ok(()) => {}
-                Err(AsyncError::Full) => {
-                    self.dropped.fetch_add(dropped + 1, Ordering::Relaxed);
-                    return Ok(());
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
-    }
 }
 
 impl Drain for Async {
@@ -767,8 +740,6 @@ impl Drain for Async {
         record: &Record,
         logger_values: &OwnedKVList,
     ) -> AsyncResult<()> {
-        self.push_dropped(logger_values)?;
-
         match self.core.log(record, logger_values) {
             Ok(()) => {}
             Err(AsyncError::Full) if self.inc_dropped => {
@@ -782,14 +753,7 @@ impl Drain for Async {
     }
 }
 
-impl Drop for Async {
-    fn drop(&mut self) {
-        let _ = self.push_dropped(&o!().into());
-    }
-}
-
 // }}}
-
 
 #[cfg(test)]
 mod test {
@@ -799,16 +763,21 @@ mod test {
     #[test]
     fn integration_test() {
         let (mock_drain, mock_drain_rx) = MockDrain::new();
-        let async_drain = AsyncBuilder::new(mock_drain)
-            .build();
-        let slog = slog::Logger::root(async_drain.fuse(), o!("field1" => "value1"));
+        let async_drain = AsyncBuilder::new(mock_drain).build();
+        let slog =
+            slog::Logger::root(async_drain.fuse(), o!("field1" => "value1"));
 
         info!(slog, "Message 1"; "field2" => "value2");
         warn!(slog, "Message 2"; "field3" => "value3");
-        assert_eq!(mock_drain_rx.recv().unwrap(), r#"INFO Message 1: [("field1", "value1"), ("field2", "value2")]"#);
-        assert_eq!(mock_drain_rx.recv().unwrap(), r#"WARN Message 2: [("field1", "value1"), ("field3", "value3")]"#);
+        assert_eq!(
+            mock_drain_rx.recv().unwrap(),
+            r#"INFO Message 1: [("field1", "value1"), ("field2", "value2")]"#
+        );
+        assert_eq!(
+            mock_drain_rx.recv().unwrap(),
+            r#"WARN Message 2: [("field1", "value1"), ("field3", "value3")]"#
+        );
     }
-
 
     /// Test-helper drain
     #[derive(Debug)]
@@ -827,7 +796,11 @@ mod test {
         type Ok = ();
         type Err = slog::Never;
 
-        fn log(&self, record: &Record, logger_kv: &OwnedKVList) -> Result<Self::Ok, Self::Err> {
+        fn log(
+            &self,
+            record: &Record,
+            logger_kv: &OwnedKVList,
+        ) -> Result<Self::Ok, Self::Err> {
             let mut serializer = MockSerializer::default();
             logger_kv.serialize(record, &mut serializer).unwrap();
             record.kv().serialize(record, &mut serializer).unwrap();
@@ -845,7 +818,11 @@ mod test {
     }
 
     impl slog::Serializer for MockSerializer {
-        fn emit_arguments(&mut self, key: Key, val: &fmt::Arguments) -> Result<(), slog::Error> {
+        fn emit_arguments(
+            &mut self,
+            key: Key,
+            val: &fmt::Arguments,
+        ) -> Result<(), slog::Error> {
             self.kvs.push((key.to_string(), val.to_string()));
             Ok(())
         }
